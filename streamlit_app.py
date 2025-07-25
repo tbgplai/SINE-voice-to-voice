@@ -8,21 +8,39 @@ from faster_whisper import WhisperModel
 import re
 import io
 
-# Set HuggingFace token
-try:
-    # Try to get from Streamlit secrets (for Streamlit Cloud)
-    os.environ["HF_TOKEN"] = st.secrets["huggingface"]["token"]
-except (KeyError, FileNotFoundError):
-    # Fallback to environment variable (for local development)
-    if "HF_TOKEN" not in os.environ:
-        # For development only - replace with your actual token
-        os.environ["HF_TOKEN"] = "hf_your_actual_token_here"
-        st.warning("⚠️ Using hardcoded token - not recommended for production!")
+# ----------------------------- TOKEN SETUP -----------------------------
+def validate_hf_token(token):
+    if not token:
+        return False
+    return token.startswith('hf_') and len(token) >= 30
+
+def prompt_for_token():
+    st.sidebar.markdown("### 🔐 HuggingFace Token Required")
+    st.sidebar.markdown("""
+    To use this app, enter your HuggingFace token below.
+    - Go to [huggingface.co](https://huggingface.co/)
+    - Create an account → Settings → Access Tokens → Create new token with 'read' access
+    """)
+    token = st.sidebar.text_input("Enter your HuggingFace token", type="password")
+    if st.sidebar.button("Submit Token"):
+        if validate_hf_token(token):
+            os.environ["HF_TOKEN"] = token
+            st.session_state["hf_token"] = token
+            st.success("Token saved. Loading models...")
+            st.rerun()
+        else:
+            st.sidebar.error("Invalid token format. Must start with 'hf_' and be at least 30 characters long.")
+
+if "hf_token" not in st.session_state:
+    prompt_for_token()
+    st.stop()
+else:
+    os.environ["HF_TOKEN"] = st.session_state["hf_token"]
 
 # Set page config
 st.set_page_config(
-    page_title="🎯 English Speaking Tutor",
-    page_icon="🎯",
+    page_title="SINE English Speaking Tutor",
+    page_icon="🤖",
     layout="wide"
 )
 
@@ -68,6 +86,8 @@ st.markdown("""
 
 # Initialize session state
 def init_session_state():
+    if 'hf_token_validated' not in st.session_state:
+        st.session_state.hf_token_validated = False
     if 'history' not in st.session_state:
         st.session_state.history = []
     if 'grade' not in st.session_state:
@@ -647,7 +667,7 @@ def reset_lesson():
 def main():
     init_session_state()
     
-    st.markdown('<h1 class="main-header">🎯 Your English Speaking Tutor</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header"> SINE English Speaking Tutor</h1>', unsafe_allow_html=True)
     
     # Sidebar for controls
     with st.sidebar:
@@ -783,6 +803,8 @@ def main():
                                 st.session_state.user_responses.append(user_text)
                                 st.session_state.evaluations.append(evaluation)
                                 st.session_state.evaluations.append(evaluation)
+                                eval_summary_msg = f"**Evaluation Summary:**\n- Pronunciation: {evaluation['pronunciation_score']}%\n- Relevance: {evaluation['relevance_score']}%\n- Vocabulary Used: {'✅' if evaluation['vocabulary_usage'] else '❌'}\n- Overall: {evaluation['overall_rating']}"
+                                st.session_state.history.append(("Bot", eval_summary_msg))
                                 
                                 # Display comprehensive evaluation
                                 question_num = st.session_state.vocab_index + 1
@@ -855,7 +877,7 @@ def main():
                             st.error("Could not transcribe audio. Please try again.")
                     
                     st.rerun()
-            
+    
             # End conversation button
             if st.session_state.phase == "completed":
                 if st.button("Get Progress Report", key="end_btn"):
