@@ -1,1 +1,6 @@
 streamlit
+gtts
+transformers
+faster-whisper
+huggingface_hub
+torchaudio  
