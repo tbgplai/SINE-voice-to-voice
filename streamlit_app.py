@@ -21,21 +21,28 @@ def prompt_for_token():
     - Go to [huggingface.co](https://huggingface.co/)
     - Create an account → Settings → Access Tokens → Create new token with 'read' access
     """)
-    token = st.sidebar.text_input("Enter your HuggingFace token", type="password")
-    if st.sidebar.button("Submit Token"):
+    token = st.sidebar.text_input("Enter your HuggingFace token", type="password", key="hf_token_input")
+    if st.sidebar.button("Submit Token", key="submit_token_btn"):
         if validate_hf_token(token):
             os.environ["HF_TOKEN"] = token
             st.session_state["hf_token"] = token
-            st.success("Token saved. Loading models...")
+            st.session_state["hf_token_validated"] = True
+            st.sidebar.success("Token saved successfully!")
             st.rerun()
         else:
             st.sidebar.error("Invalid token format. Must start with 'hf_' and be at least 30 characters long.")
 
-if "hf_token" not in st.session_state:
+# Check token status at startup
+if "hf_token_validated" not in st.session_state:
+    st.session_state["hf_token_validated"] = False
+
+if not st.session_state.get("hf_token_validated", False):
     prompt_for_token()
     st.stop()
 else:
-    os.environ["HF_TOKEN"] = st.session_state["hf_token"]
+    # Ensure token is in environment
+    if "hf_token" in st.session_state:
+        os.environ["HF_TOKEN"] = st.session_state["hf_token"]
 
 # Set page config
 st.set_page_config(
@@ -74,6 +81,13 @@ st.markdown("""
         border-left: 4px solid #F39C12;
         margin: 10px 0;
     }
+    .evaluation-box {
+        background-color: #F8F9FA;
+        padding: 15px;
+        border-radius: 10px;
+        border-left: 4px solid #6C757D;
+        margin: 10px 0;
+    }
     .report-box {
         background-color: #EBF5FB;
         padding: 20px;
@@ -86,8 +100,6 @@ st.markdown("""
 
 # Initialize session state
 def init_session_state():
-    if 'hf_token_validated' not in st.session_state:
-        st.session_state.hf_token_validated = False
     if 'history' not in st.session_state:
         st.session_state.history = []
     if 'grade' not in st.session_state:
@@ -112,19 +124,47 @@ def init_session_state():
         st.session_state.last_audio_message = ""
     if 'evaluations' not in st.session_state:
         st.session_state.evaluations = []
-    if 'stt_model' not in st.session_state:
-        with st.spinner("Loading speech recognition model..."):
-            st.session_state.stt_model = WhisperModel("base", device="cpu", compute_type="int8")
-    if 'llm_model' not in st.session_state:
-        st.session_state.llm_model = None
-        st.session_state.llm_tokenizer = None
-        try:
-            with st.spinner("Loading language model..."):
-                model_name = "google/flan-t5-base"
-                st.session_state.llm_model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
-                st.session_state.llm_tokenizer = AutoTokenizer.from_pretrained(model_name)
-        except Exception as e:
-            st.warning(f"Could not load language model: {e}. Using fallback responses.")
+    if 'models_loaded' not in st.session_state:
+        st.session_state.models_loaded = False
+        
+    # Load models only once
+    if not st.session_state.models_loaded:
+        load_models()
+
+def load_models():
+    """Load all required models with proper error handling"""
+    try:
+        # Load STT model
+        if 'stt_model' not in st.session_state:
+            with st.spinner("Loading speech recognition model..."):
+                st.session_state.stt_model = WhisperModel("base", device="cpu", compute_type="int8")
+        
+        # Load LLM model with token
+        if 'llm_model' not in st.session_state:
+            st.session_state.llm_model = None
+            st.session_state.llm_tokenizer = None
+            try:
+                with st.spinner("Loading language model..."):
+                    model_name = "google/flan-t5-base"
+                    # Use token if available
+                    token = st.session_state.get("hf_token", None)
+                    st.session_state.llm_model = AutoModelForSeq2SeqLM.from_pretrained(
+                        model_name, 
+                        token=token if token else None
+                    )
+                    st.session_state.llm_tokenizer = AutoTokenizer.from_pretrained(
+                        model_name,
+                        token=token if token else None
+                    )
+                    st.success("✅ All models loaded successfully!")
+            except Exception as e:
+                st.warning(f"Could not load language model: {e}. Using fallback responses.")
+        
+        st.session_state.models_loaded = True
+        
+    except Exception as e:
+        st.error(f"Error loading models: {e}")
+        st.session_state.models_loaded = False
 
 # Topic data
 topics = {
@@ -301,9 +341,45 @@ def pronunciation_score(expected: str, actual: str) -> int:
     return int(SequenceMatcher(None, expected.lower(), actual.lower()).ratio() * 100)
 
 def clean_text_for_tts(text):
-    """Clean text for text-to-speech"""
-    text = re.sub(r"\*\*|[*_:]", "", text)
-    text = re.sub(r"\s{2,}", " ", text)
+    """Clean text for text-to-speech - more aggressive cleaning"""
+    # Remove markdown formatting
+    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)  # Remove **bold**
+    text = re.sub(r"\*(.*?)\*", r"\1", text)      # Remove *italic*
+    text = re.sub(r"_{1,2}(.*?)_{1,2}", r"\1", text)  # Remove _underline_
+    text = re.sub(r"#{1,6}\s*", "", text)         # Remove headers
+    
+    # Remove emojis and special characters that might cause TTS issues
+    text = re.sub(r"[🤖👤📊📈📝💪🎯✅❌🎉🔊✨🌟👍⚡📚💪🔄📊🎯]", "", text)
+    text = re.sub(r"[*_:#`~•]", "", text)          # Remove remaining special chars
+    
+    # Remove bullet points and formatting
+    text = re.sub(r"^[\s]*[•\-\*]\s*", "", text, flags=re.MULTILINE)
+    
+    # Clean up spacing and newlines
+    text = re.sub(r"\s{2,}", " ", text)           # Remove extra spaces
+    text = re.sub(r"\n{2,}", ". ", text)          # Replace multiple newlines with periods
+    text = re.sub(r"\n", ". ", text)              # Replace single newlines with periods
+    
+    # Remove evaluation markers and technical terms
+    text = re.sub(r"Question \d+ Evaluation:", "Here's your evaluation:", text)
+    text = re.sub(r"Final Challenge Results", "Here are your final results", text)
+    text = re.sub(r"Progress Update - Question \d+:", "Here's your progress:", text)
+    
+    # Limit length for TTS (gTTS has character limits)
+    if len(text) > 500:
+        sentences = text.split('. ')
+        truncated = []
+        char_count = 0
+        for sentence in sentences:
+            if char_count + len(sentence) + 2 < 500:  # +2 for '. '
+                truncated.append(sentence)
+                char_count += len(sentence) + 2
+            else:
+                break
+        text = '. '.join(truncated)
+        if not text.endswith('.'):
+            text += '.'
+    
     return text.strip()
 
 def clean_text_for_display(text):
@@ -320,12 +396,19 @@ def clean_text_for_display(text):
 
 def text_to_speech(text):
     """Convert text to speech and return audio bytes"""
-    cleaned_text = clean_text_for_tts(text)
-    tts = gTTS(cleaned_text)
-    audio_buffer = io.BytesIO()
-    tts.write_to_fp(audio_buffer)
-    audio_buffer.seek(0)
-    return audio_buffer.getvalue()
+    try:
+        cleaned_text = clean_text_for_tts(text)
+        if not cleaned_text.strip():
+            return None
+            
+        tts = gTTS(text=cleaned_text, lang='en', slow=False)
+        audio_buffer = io.BytesIO()
+        tts.write_to_fp(audio_buffer)
+        audio_buffer.seek(0)
+        return audio_buffer.getvalue()
+    except Exception as e:
+        print(f"TTS Error: {e}")
+        return None
 
 def ask_llm(prompt):
     """Use Flan-T5 for text generation with fallback"""
@@ -433,50 +516,30 @@ def evaluate_response(user_text: str, expected_question: str, topic: str, vocab_
     
     return evaluation
 
-def display_evaluation(evaluation: dict, question_number: int):
-    """Display comprehensive evaluation results"""
-    st.markdown("### 📊 Question Evaluation")
+def format_evaluation_for_chat(evaluation: dict, question_number: int) -> str:
+    """Format evaluation as a chat message"""
+    eval_text = f"📊 **Question {question_number} Evaluation:**\n\n"
+    eval_text += f"**Scores:**\n"
+    eval_text += f"• Pronunciation: {evaluation['pronunciation_score']}%\n"
+    eval_text += f"• Relevance: {evaluation['relevance_score']}%\n"
+    eval_text += f"• Overall Rating: {evaluation['overall_rating']}\n"
+    eval_text += f"• Vocabulary Used: {'✅ Yes' if evaluation['vocabulary_usage'] else '❌ No'}\n\n"
     
-    # Create columns for scores
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.metric("Pronunciation", f"{evaluation['pronunciation_score']}%")
-    with col2:
-        st.metric("Relevance", f"{evaluation['relevance_score']}%")
-    with col3:
-        # Overall rating with color
-        rating = evaluation['overall_rating']
-        if rating == "Excellent":
-            st.markdown(f"**Overall:** 🌟 {rating}")
-        elif rating == "Good":
-            st.markdown(f"**Overall:** 👍 {rating}")
-        elif rating == "Fair":
-            st.markdown(f"**Overall:** ⚡ {rating}")
-        else:
-            st.markdown(f"**Overall:** 📚 {rating}")
-    
-    # Vocabulary usage indicator
-    if evaluation['vocabulary_usage']:
-        st.success("✅ Target vocabulary used correctly!")
-    else:
-        st.warning("⚠️ Target vocabulary not detected in response")
-    
-    # Strengths and improvements in expandable sections
     if evaluation['strengths']:
-        with st.expander("💪 Strengths", expanded=True):
-            for strength in evaluation['strengths']:
-                st.write(f"• {strength}")
+        eval_text += "**💪 Strengths:**\n"
+        for strength in evaluation['strengths']:
+            eval_text += f"• {strength}\n"
+        eval_text += "\n"
     
     if evaluation['improvements']:
-        with st.expander("🎯 Areas for Improvement", expanded=True):
-            for improvement in evaluation['improvements']:  
-                st.write(f"• {improvement}")
+        eval_text += "**🎯 Areas for Improvement:**\n"
+        for improvement in evaluation['improvements']:
+            eval_text += f"• {improvement}\n"
+        eval_text += "\n"
     
-    # Grammar feedback in expandable section
-    with st.expander("📝 Grammar Feedback"):
-        cleaned_feedback = clean_text_for_display(evaluation['grammar_feedback'])
-        st.write(cleaned_feedback)
+    eval_text += f"**📝 Grammar Feedback:**\n{evaluation['grammar_feedback']}"
+    
+    return eval_text
 
 def grammar_tutor_chat(user_sentence: str, topic: str, question: str = "") -> str:
     """Provide grammar feedback"""
@@ -528,58 +591,60 @@ def grammar_tutor_chat(user_sentence: str, topic: str, question: str = "") -> st
         return (f"Correction: Perfect! No changes needed.\n"
                 f"Explanation: Your sentence correctly answers the question about {topic}.\n"
                 f"Encouragement: Excellent work! You're using the {topic} vocabulary naturally!")
-    """Provide grammar feedback"""
-    if not user_sentence.strip():
-        return "Correction: (No input detected)\nExplanation: Please try speaking again.\nEncouragement: You can do it!"
 
-    # Simple grammar corrections based on patterns
-    corrected_sentence = user_sentence
-    explanation = ""
-
-    # Common grammar fixes
-    if "take off" in user_sentence.lower():
-        if "usually take off" in user_sentence.lower():
-            corrected_sentence = user_sentence.replace("take off", "takes off")
-            explanation = "Use 'takes off' (third person singular) instead of 'take off' when talking about 'flight' or 'plane'."
-        elif "will take off" in user_sentence.lower():
-            explanation = "Good use of future tense with 'will take off'!"
-
-    # Check if answer matches the question context
-    question_match = True
-    example_answer = ""
-
-    if question and "what time" in question.lower() and "take off" in question.lower():
-        if not any(time_word in user_sentence.lower() for time_word in ["am", "pm", "morning", "afternoon", "evening", "o'clock", ":"]):
-            question_match = False
-            example_answer = "My flight usually takes off at 9 AM."
-    elif question and "where" in question.lower() and "flight" in question.lower():
-        if not any(place_word in user_sentence.lower() for place_word in ["to", "from", "airport", "city", "country"]):
-            question_match = False
-            example_answer = "My last flight was to Bangkok."
-    elif question and "delay" in question.lower():
-        if "delay" not in user_sentence.lower():
-            question_match = False
-            example_answer = "Yes, my flight was delayed for two hours because of bad weather."
-
-    # Build response
-    if not question_match:
-        return (f"Correction: {corrected_sentence}\n"
-                f"Explanation: Your answer doesn't fully address the question. The question asks {question}\n"
-                f"Example Answer: {example_answer}\n"
-                f"Encouragement: Try to answer the question directly. You're doing great with the {topic} vocabulary!")
-
-    if corrected_sentence != user_sentence:
-        return (f"Correction: {corrected_sentence}\n"
-                f"Explanation: {explanation}\n"
-                f"Alternative: You could also say {example_answer if example_answer else corrected_sentence}\n"
-                f"Encouragement: Great job using {topic} vocabulary! Your pronunciation is improving!")
+def generate_progress_summary(topic, user_responses, evaluations):
+    """Generate progress summary after each vocabulary word"""
+    if not evaluations:
+        return "Keep practicing!"
+    
+    current_eval = evaluations[-1]
+    question_num = len(evaluations)
+    
+    summary = f"📈 **Progress Update - Question {question_num}:**\n\n"
+    
+    # Current performance
+    summary += f"**This Question:**\n"
+    summary += f"• Score: {current_eval['pronunciation_score']}% pronunciation, {current_eval['relevance_score']}% relevance\n"
+    summary += f"• Rating: {current_eval['overall_rating']}\n"
+    summary += f"• Vocabulary: {'Used correctly ✅' if current_eval['vocabulary_usage'] else 'Not detected ❌'}\n\n"
+    
+    # Overall progress if more than one question
+    if len(evaluations) > 1:
+        avg_pronunciation = sum(e["pronunciation_score"] for e in evaluations) / len(evaluations)
+        avg_relevance = sum(e["relevance_score"] for e in evaluations) / len(evaluations)
+        
+        summary += f"**Overall Progress ({len(evaluations)} questions):**\n"
+        summary += f"• Average Pronunciation: {avg_pronunciation:.1f}%\n"
+        summary += f"• Average Relevance: {avg_relevance:.1f}%\n"
+        
+        # Progress trend
+        if len(evaluations) >= 2:
+            prev_score = (evaluations[-2]["pronunciation_score"] + evaluations[-2]["relevance_score"]) / 2
+            curr_score = (current_eval["pronunciation_score"] + current_eval["relevance_score"]) / 2
+            
+            if curr_score > prev_score:
+                summary += f"• Trend: Improving! 📈 (+{curr_score - prev_score:.1f} points)\n"
+            elif curr_score < prev_score:
+                summary += f"• Trend: Keep practicing 📊 ({curr_score - prev_score:.1f} points)\n"
+            else:
+                summary += f"• Trend: Steady performance 📊\n"
+        
+        summary += "\n"
+    
+    # Encouragement
+    if current_eval['overall_rating'] == "Excellent":
+        summary += "🌟 Amazing work! You're mastering this vocabulary!"
+    elif current_eval['overall_rating'] == "Good":
+        summary += "👍 Great job! You're making solid progress!"
+    elif current_eval['overall_rating'] == "Fair":
+        summary += "💪 Good effort! Keep practicing to improve!"
     else:
-        return (f"Correction: Perfect! No changes needed.\n"
-                f"Explanation: Your sentence correctly answers the question about {topic}.\n"
-                f"Encouragement: Excellent work! You're using the {topic} vocabulary naturally!")
+        summary += "📚 Don't worry! Practice makes perfect!"
+    
+    return summary
 
 def generate_report(topic, user_responses, pronunciation_scores):
-    """Generate progress report"""
+    """Generate final progress report"""
     avg_pronunciation = sum(pronunciation_scores) / len(pronunciation_scores) if pronunciation_scores else 0
 
     # Extract topic info for better fallback
@@ -637,19 +702,51 @@ def generate_report(topic, user_responses, pronunciation_scores):
 
     return " ".join(fallback_report_parts)
 
-def display_history():
-    """Display conversation history with cleaned text"""
-    for role, message in st.session_state.history:
+def display_history_with_audio():
+    """Display conversation history with automatic audio for bot messages"""
+    for i, (role, message) in enumerate(st.session_state.history):
         # Clean the message for display
         cleaned_message = clean_text_for_display(message)
         
         if role == "Bot":
             st.markdown(f'<div class="message-bot"><strong>🤖 Bot:</strong> {cleaned_message}</div>', unsafe_allow_html=True)
-        else:
+            
+            # Only generate and play audio for the LAST bot message that hasn't been played yet
+            is_last_bot_message = (i == len(st.session_state.history) - 1)
+            audio_key = f"audio_played_{i}"
+            
+            # Check if this is a new bot message that needs audio
+            if is_last_bot_message and audio_key not in st.session_state:
+                try:
+                    with st.spinner("🔊 Generating audio..."):
+                        audio_bytes = text_to_speech(message)
+                        if audio_bytes:
+                            st.audio(audio_bytes, format="audio/mp3", autoplay=True)
+                        # Mark this message as having had its audio played
+                        st.session_state[audio_key] = True
+                except Exception as e:
+                    st.warning(f"Could not generate audio: {e}")
+            
+            # For older messages, show audio player without autoplay
+            elif audio_key in st.session_state:
+                try:
+                    audio_bytes = text_to_speech(message)
+                    if audio_bytes:
+                        st.audio(audio_bytes, format="audio/mp3", autoplay=False)
+                except Exception as e:
+                    pass  # Silently fail for older messages
+                    
+        elif role == "User":
             st.markdown(f'<div class="message-user"><strong>👤 You:</strong> {cleaned_message}</div>', unsafe_allow_html=True)
+        elif role == "Evaluation":
+            st.markdown(f'<div class="evaluation-box">{cleaned_message}</div>', unsafe_allow_html=True)
+
+def display_history():
+    """Display conversation history with cleaned text (kept for backward compatibility)"""
+    display_history_with_audio()
 
 def reset_lesson():
-    """Reset all lesson state"""
+    """Reset all lesson state including audio cache"""
     st.session_state.history = []
     st.session_state.grade = None
     st.session_state.topic = None
@@ -662,15 +759,28 @@ def reset_lesson():
     st.session_state.lesson_completed = False
     st.session_state.last_audio_message = ""
     st.session_state.evaluations = []
+    
+    # Clear audio playing cache (updated key pattern)
+    keys_to_remove = [key for key in st.session_state.keys() if key.startswith("audio_played_")]
+    for key in keys_to_remove:
+        del st.session_state[key]
 
 # Main app
 def main():
     init_session_state()
     
-    st.markdown('<h1 class="main-header"> SINE English Speaking Tutor</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">🤖 SINE English Speaking Tutor</h1>', unsafe_allow_html=True)
     
-    # Sidebar for controls
+    # Show token status in sidebar
     with st.sidebar:
+        if st.session_state.get("hf_token_validated", False):
+            st.success("✅ HuggingFace Token Valid")
+            if st.button("Reset Token", key="reset_token_btn"):
+                st.session_state.hf_token_validated = False
+                if "hf_token" in st.session_state:
+                    del st.session_state["hf_token"]
+                st.rerun()
+        
         st.header("Lesson Setup")
         
         # Grade selection
@@ -713,30 +823,16 @@ def main():
             topic_data = topics[st.session_state.grade][st.session_state.topic]
             first_vocab = topic_data["vocab"][0]
             
-            bot_intro = f"Hi there! I'm your SINE English speaking assistant. Today we're learning about {st.session_state.topic} for {st.session_state.grade}. You'll practice 3 useful words. Let's start with the first word: {first_vocab['word']}."
-            bot_explanation = f"\nMeaning: {first_vocab['meaning']}\nExample: {first_vocab['example']}\n\nReady to practice using this word?"
+            bot_intro = f"Hi there! I'm your SINE English speaking assistant. Today we're learning about {st.session_state.topic} for {st.session_state.grade}. You'll practice 3 useful words. Let's start with the first word: **{first_vocab['word']}**."
+            bot_explanation = f"\n\n**Meaning:** {first_vocab['meaning']}\n**Example:** {first_vocab['example']}\n\nReady to practice using this word?"
             full_bot_response = bot_intro + bot_explanation
             
             st.session_state.history.append(("Bot", full_bot_response))
             st.rerun()
         
-        # Display conversation history
+        # Display conversation history with audio
         if st.session_state.history:
-            display_history()
-            
-            # Add audio for the latest bot message (only if it's new)
-            if (st.session_state.history and 
-                st.session_state.history[-1][0] == "Bot" and 
-                st.session_state.history[-1][1] != st.session_state.last_audio_message):
-                
-                latest_bot_message = st.session_state.history[-1][1]
-                try:
-                    with st.spinner("🔊 Generating audio..."):
-                        audio_bytes = text_to_speech(latest_bot_message)
-                        st.audio(audio_bytes, format="audio/mp3")
-                        st.session_state.last_audio_message = latest_bot_message
-                except Exception as e:
-                    st.warning(f"Could not generate audio: {e}")
+            display_history_with_audio()
         else:
             st.info("Welcome! Please select your grade and topic from the sidebar to begin.")
     
@@ -752,20 +848,20 @@ def main():
                     if st.session_state.phase == "intro":
                         # First continue - ask the first question
                         current_word = topic_data["vocab"][st.session_state.vocab_index]
-                        bot_response = f"Now let's practice! Question: {current_word['question']}\n\nPlease record your answer using the microphone below."
+                        bot_response = f"Now let's practice! **Question:** {current_word['question']}\n\nPlease record your answer using the microphone below."
                         st.session_state.history.append(("Bot", bot_response))
                         st.session_state.phase = "vocab_practice"
                         
                     elif st.session_state.phase == "vocab_intro":
                         # Continue after introducing a new vocab word
                         current_word = topic_data["vocab"][st.session_state.vocab_index]
-                        bot_response = f"Now let's practice this word! Question: {current_word['question']}\n\nPlease record your answer."
+                        bot_response = f"Now let's practice this word! **Question:** {current_word['question']}\n\nPlease record your answer."
                         st.session_state.history.append(("Bot", bot_response))
                         st.session_state.phase = "vocab_practice"
                         
                     elif st.session_state.phase == "challenge_intro":
                         # Continue to final challenge
-                        bot_response = f"Here's your final challenge:\n\n{topic_data['final_challenge']}\n\nPlease record your story."
+                        bot_response = f"Here's your final challenge:\n\n**{topic_data['final_challenge']}**\n\nPlease record your story."
                         st.session_state.history.append(("Bot", bot_response))
                         st.session_state.phase = "challenge"
                     
@@ -802,14 +898,19 @@ def main():
                                 st.session_state.pronunciation_scores.append(evaluation["pronunciation_score"])
                                 st.session_state.user_responses.append(user_text)
                                 st.session_state.evaluations.append(evaluation)
-                                st.session_state.evaluations.append(evaluation)
-                                eval_summary_msg = f"**Evaluation Summary:**\n- Pronunciation: {evaluation['pronunciation_score']}%\n- Relevance: {evaluation['relevance_score']}%\n- Vocabulary Used: {'✅' if evaluation['vocabulary_usage'] else '❌'}\n- Overall: {evaluation['overall_rating']}"
-                                st.session_state.history.append(("Bot", eval_summary_msg))
                                 
-                                # Display comprehensive evaluation
+                                # Add evaluation to chat history
                                 question_num = st.session_state.vocab_index + 1
-                                st.markdown(f"#### Question {question_num} Results")
-                                display_evaluation(evaluation, question_num)
+                                eval_message = format_evaluation_for_chat(evaluation, question_num)
+                                st.session_state.history.append(("Evaluation", eval_message))
+                                
+                                # Add progress summary to chat history
+                                progress_summary = generate_progress_summary(
+                                    st.session_state.topic, 
+                                    st.session_state.user_responses, 
+                                    st.session_state.evaluations
+                                )
+                                st.session_state.history.append(("Bot", progress_summary))
                                 
                                 # Move to next vocab word or final challenge
                                 st.session_state.vocab_index += 1
@@ -817,12 +918,12 @@ def main():
                                 if st.session_state.vocab_index < len(topic_data["vocab"]):
                                     # Introduce next vocab word
                                     next_word_data = topic_data["vocab"][st.session_state.vocab_index]
-                                    bot_response = f"Great job! Now let's learn the next word: {next_word_data['word']}.\nMeaning: {next_word_data['meaning']}\nExample: {next_word_data['example']}\n\nReady to practice?"
+                                    bot_response = f"Great job! Now let's learn the next word: **{next_word_data['word']}**.\n\n**Meaning:** {next_word_data['meaning']}\n**Example:** {next_word_data['example']}\n\nReady to practice?"
                                     st.session_state.history.append(("Bot", bot_response))
                                     st.session_state.phase = "vocab_intro"
                                 else:
                                     # Move to final challenge
-                                    bot_response = "Excellent! You've practiced all the vocabulary words. Ready for your final challenge?"
+                                    bot_response = "🎉 Excellent! You've practiced all the vocabulary words. Ready for your final challenge? This will test how well you can use all the words together!"
                                     st.session_state.history.append(("Bot", bot_response))
                                     st.session_state.phase = "challenge_intro"
                                 
@@ -864,12 +965,13 @@ def main():
                                 
                                 st.session_state.pronunciation_scores.append(evaluation["pronunciation_score"])
                                 st.session_state.user_responses.append(user_text)
+                                st.session_state.evaluations.append(evaluation)
                                 
-                                # Display final challenge evaluation
-                                st.markdown("#### 🏆 Final Challenge Results")
-                                display_evaluation(evaluation, "Final")
+                                # Add final challenge evaluation to chat history
+                                eval_message = format_evaluation_for_chat(evaluation, "Final Challenge")
+                                st.session_state.history.append(("Evaluation", eval_message))
                                 
-                                bot_response = "Fantastic work! You've completed the entire lesson."
+                                bot_response = "🎉 Fantastic work! You've completed the entire lesson. Click 'Start New Lesson' to continue practice!"
                                 st.session_state.history.append(("Bot", bot_response))
                                 st.session_state.phase = "completed"
                                 st.session_state.lesson_completed = True
@@ -878,63 +980,90 @@ def main():
                     
                     st.rerun()
     
-            # End conversation button
+            # End conversation button and progress report
             if st.session_state.phase == "completed":
-                if st.button("Get Progress Report", key="end_btn"):
-                    # Display comprehensive session summary
-                    st.markdown("## 📊 Complete Session Summary")
-                    
-                    # Overall statistics
-                    if st.session_state.evaluations:
-                        avg_pronunciation = sum(e["pronunciation_score"] for e in st.session_state.evaluations) / len(st.session_state.evaluations)
-                        avg_relevance = sum(e["relevance_score"] for e in st.session_state.evaluations) / len(st.session_state.evaluations)
-                        
-                        col1, col2, col3, col4 = st.columns(4)
-                        with col1:
-                            st.metric("Questions Completed", len(st.session_state.evaluations))
-                        with col2:
-                            st.metric("Avg. Pronunciation", f"{avg_pronunciation:.1f}%")
-                        with col3:
-                            st.metric("Avg. Relevance", f"{avg_relevance:.1f}%")
-                        with col4:
-                            excellent_count = sum(1 for e in st.session_state.evaluations if e["overall_rating"] == "Excellent")
-                            st.metric("Excellent Responses", f"{excellent_count}/{len(st.session_state.evaluations)}")
-                    
-                    # Individual question breakdown
-                    st.markdown("### 📝 Question-by-Question Breakdown")
-                    for i, evaluation in enumerate(st.session_state.evaluations):
-                        question_type = "Final Challenge" if i == len(st.session_state.evaluations) - 1 and st.session_state.phase == "completed" and len(st.session_state.evaluations) > 3 else f"Question {i+1}"
-                        
-                        with st.expander(f"{question_type} - {evaluation['overall_rating']} ({evaluation['pronunciation_score']}% pronunciation)"):
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                st.write("**Your Response:**")
-                                st.write(f'"{st.session_state.user_responses[i]}"')
-                            with col2:
-                                st.write("**Evaluation:**")
-                                st.write(f"• Pronunciation: {evaluation['pronunciation_score']}%")
-                                st.write(f"• Relevance: {evaluation['relevance_score']}%")
-                                st.write(f"• Vocabulary Used: {'✅' if evaluation['vocabulary_usage'] else '❌'}")
-                            
-                            if evaluation['strengths']:
-                                st.write("**Strengths:**")
-                                for strength in evaluation['strengths']:
-                                    st.write(f"• {strength}")
-                    
-                    # Generate and display final report
+                st.subheader("🎉 Lesson Complete!")
+                
+                # Show Get Progress Report button
+                if st.button("📊 Get Detailed Progress Report", key="progress_report_btn", type="primary"):
+                    # Generate and display final report in chat
                     report = generate_report(f"{st.session_state.grade} - {st.session_state.topic}", 
                                            st.session_state.user_responses, 
                                            st.session_state.pronunciation_scores)
                     
-                    report_msg = f"📊 Your Progress Report\n\n{report}\n\nThank you for practicing with me today! Keep up the great work! 🌟"
+                    # Create comprehensive session summary
+                    summary_stats = ""
+                    if st.session_state.evaluations:
+                        avg_pronunciation = sum(e["pronunciation_score"] for e in st.session_state.evaluations) / len(st.session_state.evaluations)
+                        avg_relevance = sum(e["relevance_score"] for e in st.session_state.evaluations) / len(st.session_state.evaluations)
+                        excellent_count = sum(1 for e in st.session_state.evaluations if e["overall_rating"] == "Excellent")
+                        good_count = sum(1 for e in st.session_state.evaluations if e["overall_rating"] == "Good")
+                        
+                        summary_stats = f"\n\n📊 **Session Statistics:**\n"
+                        summary_stats += f"• Questions Completed: {len(st.session_state.evaluations)}\n"
+                        summary_stats += f"• Average Pronunciation: {avg_pronunciation:.1f}%\n"
+                        summary_stats += f"• Average Relevance: {avg_relevance:.1f}%\n"
+                        summary_stats += f"• Excellent Responses: {excellent_count}/{len(st.session_state.evaluations)}\n"
+                        summary_stats += f"• Good Responses: {good_count}/{len(st.session_state.evaluations)}\n"
+                        
+                        # Calculate improvement trend
+                        if len(st.session_state.evaluations) >= 2:
+                            first_half = st.session_state.evaluations[:len(st.session_state.evaluations)//2]
+                            second_half = st.session_state.evaluations[len(st.session_state.evaluations)//2:]
+                            
+                            first_avg = sum((e["pronunciation_score"] + e["relevance_score"])/2 for e in first_half) / len(first_half)
+                            second_avg = sum((e["pronunciation_score"] + e["relevance_score"])/2 for e in second_half) / len(second_half)
+                            
+                            if second_avg > first_avg:
+                                summary_stats += f"• Learning Trend: 📈 Improving! (+{second_avg - first_avg:.1f} points)\n"
+                            elif second_avg < first_avg:
+                                summary_stats += f"• Learning Trend: 📊 Steady practice needed ({second_avg - first_avg:.1f} points)\n"
+                            else:
+                                summary_stats += f"• Learning Trend: 📊 Consistent performance\n"
                     
-                    # Clean the report for display
-                    cleaned_report = clean_text_for_display(report_msg)
-                    st.markdown(f'<div class="report-box">{cleaned_report}</div>', unsafe_allow_html=True)
+                    final_report = f"🎯 **Final Progress Report**\n\n{report}{summary_stats}\n\n✨ Thank you for practicing with me today! Keep up the great work!"
+                    
+                    st.session_state.history.append(("Bot", final_report))
+                    st.session_state.phase = "report_shown"
+                    st.rerun()
+                
+                # Show summary statistics in sidebar as preview
+                if st.session_state.evaluations:
+                    st.markdown("### 📈 Quick Stats Preview")
+                    avg_pronunciation = sum(e["pronunciation_score"] for e in st.session_state.evaluations) / len(st.session_state.evaluations)
+                    excellent_count = sum(1 for e in st.session_state.evaluations if e["overall_rating"] == "Excellent")
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric("Avg. Score", f"{avg_pronunciation:.1f}%", 
+                                 delta=f"{avg_pronunciation - 70:.1f}" if avg_pronunciation > 70 else None)
+                    with col2:
+                        st.metric("Excellent", f"{excellent_count}/{len(st.session_state.evaluations)}")
+                    
+                    # Show vocabulary mastery
+                    if st.session_state.topic and st.session_state.grade:
+                        topic_data = topics[st.session_state.grade][st.session_state.topic]
+                        vocab_used = []
+                        for response in st.session_state.user_responses:
+                            for vocab_item in topic_data["vocab"]:
+                                if vocab_item["word"].lower() in response.lower() and vocab_item["word"] not in vocab_used:
+                                    vocab_used.append(vocab_item["word"])
+                        
+                        st.markdown(f"**Vocabulary Used:** {len(vocab_used)}/{len(topic_data['vocab'])}")
+                        if vocab_used:
+                            st.markdown(f"✅ {', '.join(vocab_used)}")
+            
+            # After report is shown, show restart option
+            elif st.session_state.phase == "report_shown":
+                st.success("✅ Complete progress report generated!")
+                if st.button("🔄 Start New Lesson", key="restart_btn", type="secondary"):
+                    reset_lesson()
+                    st.rerun()
         
-        elif st.session_state.lesson_completed:
+        elif st.session_state.lesson_completed or st.session_state.phase == "report_shown":
             st.success("Lesson completed! 🎉")
-            if st.button("Start New Lesson"):
+            st.info("You can view your detailed progress report above or start a new lesson.")
+            if st.button("Start New Lesson", key="new_lesson_btn"):
                 reset_lesson()
                 st.rerun()
 
