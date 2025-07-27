@@ -132,39 +132,36 @@ def init_session_state():
         load_models()
 
 def load_models():
-    """Load all required models with proper error handling"""
+    """Load all required models with proper error handling for Streamlit deployment"""
     try:
         # Load STT model
         if 'stt_model' not in st.session_state:
             with st.spinner("Loading speech recognition model..."):
                 st.session_state.stt_model = WhisperModel("base", device="cpu", compute_type="int8")
-        
-        # Load LLM model with token
+
+        # Load LLM model using only local files for offline deployment
         if 'llm_model' not in st.session_state:
             st.session_state.llm_model = None
             st.session_state.llm_tokenizer = None
             try:
                 with st.spinner("Loading language model..."):
-                    model_name = "google/flan-t5-base"
-                    # Use token if available
-                    token = st.session_state.get("hf_token", None)
+                    local_model_path = "models/google/flan-t5-base"
                     st.session_state.llm_model = AutoModelForSeq2SeqLM.from_pretrained(
-                        model_name, 
-                        token=token if token else None
+                        local_model_path, local_files_only=True
                     )
                     st.session_state.llm_tokenizer = AutoTokenizer.from_pretrained(
-                        model_name,
-                        token=token if token else None
+                        local_model_path, local_files_only=True
                     )
-                    st.success("✅ All models loaded successfully!")
+                    st.success("✅ All models loaded successfully from local path!")
             except Exception as e:
-                st.warning(f"Could not load language model: {e}. Using fallback responses.")
-        
+                st.warning(f"Could not load language model locally: {e}. Using fallback responses.")
+
         st.session_state.models_loaded = True
-        
+
     except Exception as e:
         st.error(f"Error loading models: {e}")
         st.session_state.models_loaded = False
+
 
 # Topic data
 topics = {
