@@ -132,37 +132,41 @@ def init_session_state():
         load_models()
 
 def load_models():
-    """Load all required models with fallback for Streamlit deployment"""
+    """Load all required models with flexible fallback and dynamic local path resolution"""
+    import pathlib
+
     try:
         # Load STT model
         if 'stt_model' not in st.session_state:
             with st.spinner("Loading speech recognition model..."):
                 st.session_state.stt_model = WhisperModel("base", device="cpu", compute_type="int8")
 
-        # Load LLM model with flexible fallback
+        # Load LLM model with dynamic fallback
         if 'llm_model' not in st.session_state:
             st.session_state.llm_model = None
             st.session_state.llm_tokenizer = None
+
             try:
                 with st.spinner("Loading language model..."):
-                    local_model_path = os.path.join("models", "google", "flan-t5-base")
                     model_name = "google/flan-t5-base"
+                    base_dir = pathlib.Path(__file__).parent if "__file__" in globals() else pathlib.Path.cwd()
+                    local_model_path = base_dir / "models" / "google" / "flan-t5-base"
 
-                    if os.path.exists(local_model_path):
+                    if local_model_path.exists():
                         st.session_state.llm_model = AutoModelForSeq2SeqLM.from_pretrained(
-                            local_model_path, local_files_only=True
+                            str(local_model_path), local_files_only=True
                         )
                         st.session_state.llm_tokenizer = AutoTokenizer.from_pretrained(
-                            local_model_path, local_files_only=True
+                            str(local_model_path), local_files_only=True
                         )
                         st.success("✅ Language model loaded from local path.")
                     else:
-                        raise FileNotFoundError("Local model path not found.")
+                        raise FileNotFoundError("Local model folder not found at: " + str(local_model_path))
 
             except Exception as e:
                 st.warning(f"Local load failed: {e}. Trying Hugging Face Hub if token is available...")
                 try:
-                    token = st.session_state.get("hf_token")
+                    token = st.secrets.get("hf_token")  # Option A: Load from secrets.toml
                     if token:
                         st.session_state.llm_model = AutoModelForSeq2SeqLM.from_pretrained(
                             model_name,
@@ -176,7 +180,7 @@ def load_models():
                         )
                         st.success("✅ Language model loaded using Hugging Face Hub.")
                     else:
-                        raise ValueError("No HF token found and local model unavailable.")
+                        raise ValueError("No HF token found in secrets and local model unavailable.")
                 except Exception as e:
                     st.warning(f"Could not load language model from Hugging Face: {e}. Using fallback responses.")
 
@@ -185,6 +189,7 @@ def load_models():
     except Exception as e:
         st.error(f"Error loading models: {e}")
         st.session_state.models_loaded = False
+
 
 # Topic data
 topics = {
