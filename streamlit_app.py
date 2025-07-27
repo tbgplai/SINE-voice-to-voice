@@ -148,9 +148,9 @@ def load_models():
 
             try:
                 with st.spinner("Loading language model..."):
-                    model_name = "google/flan-t5-base"
+                    model_name = "google/flan-t5-small"
                     base_dir = pathlib.Path(__file__).parent if "__file__" in globals() else pathlib.Path.cwd()
-                    local_model_path = base_dir / "models" / "google" / "flan-t5-base"
+                    local_model_path = base_dir / "models" / "google" / "flan-t5-small"
 
                     if local_model_path.exists():
                         st.session_state.llm_model = AutoModelForSeq2SeqLM.from_pretrained(
